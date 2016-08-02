@@ -36,7 +36,8 @@ def get_app(
         exclude_tables=None,
         user_models=None,
         reflect_all=True,
-        read_only=False):
+        read_only=False,
+        application_name='Sandman2'):
     """Return an application instance connected to the database described in
     *database_uri*.
 
@@ -48,7 +49,7 @@ def get_app(
     :param bool reflect_all: Include all database tables in the API service
     :param bool read_only: Only allow HTTP GET commands for all endpoints
     """
-    app = Flask('sandman2')
+    app = Flask(application_name)
     app.config['SQLALCHEMY_DATABASE_URI'] = database_uri
     app.config['SANDMAN2_READ_ONLY'] = read_only
     app.classes = []
