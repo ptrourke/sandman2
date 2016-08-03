@@ -28,6 +28,10 @@ __version__ = '0.0.7'
 # Augment sandman2's Model class with the Automap and Flask-SQLAlchemy model
 # classes
 
+Model = declarative_base(cls=(Model, db.Model))
+AutomapModel = automap_base(Model)
+auth = HTTPBasicAuth()
+
 def get_app(
         database_uri,
         exclude_tables=None,
@@ -46,9 +50,7 @@ def get_app(
     :param bool reflect_all: Include all database tables in the API service
     :param bool read_only: Only allow HTTP GET commands for all endpoints
     """
-    Model = declarative_base(cls=(Model, db.Model))
-    AutomapModel = automap_base(Model)
-    auth = HTTPBasicAuth()
+
 
     def _register_error_handlers(app):
         """Register error-handlers for the application.
