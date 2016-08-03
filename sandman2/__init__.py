@@ -27,9 +27,6 @@ __version__ = '0.0.7'
 
 # Augment sandman2's Model class with the Automap and Flask-SQLAlchemy model
 # classes
-Model = declarative_base(cls=(Model, db.Model))
-AutomapModel = automap_base(Model)
-auth = HTTPBasicAuth()
 
 def get_app(
         database_uri,
@@ -49,6 +46,130 @@ def get_app(
     :param bool reflect_all: Include all database tables in the API service
     :param bool read_only: Only allow HTTP GET commands for all endpoints
     """
+    Model = declarative_base(cls=(Model, db.Model))
+    AutomapModel = automap_base(Model)
+    auth = HTTPBasicAuth()
+
+    def _register_error_handlers(app):
+        """Register error-handlers for the application.
+
+        :param app: The application instance
+        """
+
+        @app.errorhandler(BadRequestException)
+        @app.errorhandler(ForbiddenException)
+        @app.errorhandler(NotAcceptableException)
+        @app.errorhandler(NotFoundException)
+        @app.errorhandler(ConflictException)
+        @app.errorhandler(ServerErrorException)
+        @app.errorhandler(NotImplementedException)
+        @app.errorhandler(ServiceUnavailableException)
+        def handle_application_error(error):  # pylint:disable=unused-variable
+            """Handler used to send JSON error messages rather than default HTML
+            ones."""
+            response = jsonify(error.to_dict())
+            response.status_code = error.code
+            return response
+
+    def register_service(cls, primary_key_type):
+        """Register an API service endpoint.
+
+        :param cls: The class to register
+        :param str primary_key_type: The type (as a string) of the primary_key
+                                     field
+        """
+        view_func = cls.as_view(cls.__name__.lower())  # pylint: disable=no-member
+        methods = set(cls.__model__.__methods__)  # pylint: disable=no-member
+
+        if 'GET' in methods:  # pylint: disable=no-member
+            current_app.add_url_rule(
+                cls.__model__.__url__ + '/', defaults={'resource_id': None},
+                view_func=view_func,
+                methods=['GET'])
+            current_app.add_url_rule(
+                '{resource}/meta'.format(resource=cls.__model__.__url__),
+                view_func=view_func,
+                methods=['GET'])
+        if 'POST' in methods:  # pylint: disable=no-member
+            current_app.add_url_rule(
+                cls.__model__.__url__ + '/', view_func=view_func, methods=['POST', ])
+        current_app.add_url_rule(
+            '{resource}/<{pk_type}:{pk}>'.format(
+                resource=cls.__model__.__url__,
+                pk='resource_id', pk_type=primary_key_type),
+            view_func=view_func,
+            methods=methods - {'POST'})
+        current_app.classes.append(cls)
+
+    def _reflect_all(exclude_tables=None, admin=None, read_only=False):
+        """Register all tables in the given database as services.
+
+        :param list exclude_tables: A list of tables to exclude from the API
+                                    service
+        """
+        AutomapModel.prepare(  # pylint:disable=maybe-no-member
+            db.engine, reflect=True)
+        for cls in AutomapModel.classes:
+            if exclude_tables and cls.__table__.name in exclude_tables:
+                continue
+            if read_only:
+                cls.__methods__ = {'GET'}
+            register_model(cls, admin)
+
+    def register_model(cls, admin=None):
+        """Register *cls* to be included in the API service
+
+        :param cls: Class deriving from :class:`sandman2.models.Model`
+        """
+        cls.__url__ = '/{}'.format(cls.__name__.lower())
+        service_class = type(
+            cls.__name__ + 'Service',
+            (Service,),
+            {
+                '__model__': cls,
+                '__version__': __version__,
+            })
+
+        # inspect primary key
+        cols = list(cls().__table__.primary_key.columns)
+
+        # composite keys not supported (yet)
+        primary_key_type = 'string'
+        if len(cols) == 1:
+            col_type = cols[0].type
+            # types defined at http://flask.pocoo.org/docs/0.10/api/#url-route-registrations
+            if isinstance(col_type, sqltypes.String):
+                primary_key_type = 'string'
+            elif isinstance(col_type, sqltypes.Integer):
+                primary_key_type = 'int'
+            elif isinstance(col_type, sqltypes.Numeric):
+                primary_key_type = 'float'
+            else:
+                # unsupported primary key type
+                primary_key_type = 'string'
+
+        # registration
+        register_service(service_class, primary_key_type)
+        if admin is not None:
+            admin.add_view(CustomAdminView(cls, db.session))
+
+    def _register_user_models(user_models, admin=None):
+        """Register any user-defined models with the API Service.
+
+        :param list user_models: A list of user-defined models to include in the
+                                 API service
+        """
+        if any([True for cls in user_models if issubclass(cls, AutomapModel)]):
+            AutomapModel.prepare(  # pylint:disable=maybe-no-member
+                db.engine, reflect=True)
+
+        for user_model in user_models:
+            if not issubclass(user_model, AutomapModel):
+                model_type = type(user_model.__name__, (user_model, Model), {})
+                register_model(model_type, admin)
+            else:
+                register_model(user_model, admin)
+
     app = Flask(application_name)
     app.config['SQLALCHEMY_DATABASE_URI'] = database_uri
     app.config['SANDMAN2_READ_ONLY'] = read_only
@@ -73,127 +194,3 @@ def get_app(
                 cls.__model__.primary_key())
         return jsonify(routes)
     return app
-
-
-def _register_error_handlers(app):
-    """Register error-handlers for the application.
-
-    :param app: The application instance
-    """
-    @app.errorhandler(BadRequestException)
-    @app.errorhandler(ForbiddenException)
-    @app.errorhandler(NotAcceptableException)
-    @app.errorhandler(NotFoundException)
-    @app.errorhandler(ConflictException)
-    @app.errorhandler(ServerErrorException)
-    @app.errorhandler(NotImplementedException)
-    @app.errorhandler(ServiceUnavailableException)
-    def handle_application_error(error):  # pylint:disable=unused-variable
-        """Handler used to send JSON error messages rather than default HTML
-        ones."""
-        response = jsonify(error.to_dict())
-        response.status_code = error.code
-        return response
-
-
-def register_service(cls, primary_key_type):
-    """Register an API service endpoint.
-
-    :param cls: The class to register
-    :param str primary_key_type: The type (as a string) of the primary_key
-                                 field
-    """
-    view_func = cls.as_view(cls.__name__.lower())  # pylint: disable=no-member
-    methods = set(cls.__model__.__methods__)  # pylint: disable=no-member
-
-    if 'GET' in methods:  # pylint: disable=no-member
-        current_app.add_url_rule(
-            cls.__model__.__url__ + '/', defaults={'resource_id': None},
-            view_func=view_func,
-            methods=['GET'])
-        current_app.add_url_rule(
-            '{resource}/meta'.format(resource=cls.__model__.__url__),
-            view_func=view_func,
-            methods=['GET'])
-    if 'POST' in methods:  # pylint: disable=no-member
-        current_app.add_url_rule(
-            cls.__model__.__url__ + '/', view_func=view_func, methods=['POST', ])
-    current_app.add_url_rule(
-        '{resource}/<{pk_type}:{pk}>'.format(
-            resource=cls.__model__.__url__,
-            pk='resource_id', pk_type=primary_key_type),
-        view_func=view_func,
-        methods=methods - {'POST'})
-    current_app.classes.append(cls)
-
-
-def _reflect_all(exclude_tables=None, admin=None, read_only=False):
-    """Register all tables in the given database as services.
-
-    :param list exclude_tables: A list of tables to exclude from the API
-                                service
-    """
-    AutomapModel.prepare(  # pylint:disable=maybe-no-member
-        db.engine, reflect=True)
-    for cls in AutomapModel.classes:
-        if exclude_tables and cls.__table__.name in exclude_tables:
-            continue
-        if read_only:
-            cls.__methods__ = {'GET'}
-        register_model(cls, admin)
-
-
-def register_model(cls, admin=None):
-    """Register *cls* to be included in the API service
-
-    :param cls: Class deriving from :class:`sandman2.models.Model`
-    """
-    cls.__url__ = '/{}'.format(cls.__name__.lower())
-    service_class = type(
-        cls.__name__ + 'Service',
-        (Service,),
-        {
-            '__model__': cls,
-            '__version__': __version__,
-        })
-    
-    # inspect primary key    
-    cols = list(cls().__table__.primary_key.columns)
-    
-    # composite keys not supported (yet)
-    primary_key_type = 'string'
-    if len(cols) == 1:
-        col_type = cols[0].type
-        # types defined at http://flask.pocoo.org/docs/0.10/api/#url-route-registrations
-        if isinstance(col_type, sqltypes.String):
-            primary_key_type = 'string'
-        elif isinstance(col_type, sqltypes.Integer):
-            primary_key_type = 'int'
-        elif isinstance(col_type, sqltypes.Numeric):
-            primary_key_type = 'float'
-        else:
-            # unsupported primary key type
-            primary_key_type = 'string'
-    
-    # registration
-    register_service(service_class, primary_key_type)
-    if admin is not None:
-        admin.add_view(CustomAdminView(cls, db.session))
-
-
-def _register_user_models(user_models, admin=None):
-    """Register any user-defined models with the API Service.
-
-    :param list user_models: A list of user-defined models to include in the
-                             API service
-    """
-    if any([True for cls in user_models if issubclass(cls, AutomapModel)]):
-        AutomapModel.prepare(  # pylint:disable=maybe-no-member
-                               db.engine, reflect=True)
-
-    for user_model in user_models:
-        if not issubclass(user_model, AutomapModel):
-            model_type = type(user_model.__name__, (user_model, Model), {})
-            register_model(model_type, admin)
-        else:
-            register_model(user_model, admin)
